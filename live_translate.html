@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Live Subtitle</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-tap-highlight-color: transparent; /* Prevents flash on mobile tap */
+        }
+        /* Custom style for the transcript container */
+        #transcript-container {
+            flex-grow: 1;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col h-screen w-screen overflow-hidden">
+
+    <!-- Header -->
+    <header class="text-center p-4 border-b border-gray-700 shadow-lg flex-shrink-0 relative" role="banner">
+        <h1 class="text-2xl font-bold">Live Subtitles</h1>
+        <canvas id="waveform" class="absolute top-0 left-0 w-full h-full opacity-30 pointer-events-none" width="800" height="80"></canvas>
+    </header>
+
+    <!-- Transcript Display -->
+    <main id="transcript-container" class="w-full flex-grow p-6 md:p-10 flex flex-col justify-start" role="main" aria-live="polite">
+        <!-- Transcript will be dynamically inserted here -->
+    </main>
+
+    <!-- Controls -->
+    <footer class="p-6 bg-gray-900/80 backdrop-blur-sm border-t border-gray-700 flex-shrink-0">
+        <div class="flex flex-col items-center space-y-4">
+            <div class="flex items-center space-x-4">
+                <label for="language-select" class="text-sm font-medium">Language:</label>
+                <select id="language-select" class="bg-gray-800 text-white px-3 py-2 rounded-md border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-400">
+                    <option value="en-US">English (US)</option>
+                    <option value="en-GB">English (UK)</option>
+                    <option value="es-ES">Spanish</option>
+                    <option value="fr-FR">French</option>
+                    <option value="de-DE">German</option>
+                    <option value="it-IT">Italian</option>
+                    <option value="pt-BR">Portuguese (Brazil)</option>
+                    <option value="ja-JP">Japanese</option>
+                    <option value="ko-KR">Korean</option>
+                    <option value="zh-CN">Chinese (Mandarin)</option>
+                </select>
+            </div>
+            <div class="flex items-center space-x-4">
+                <button id="controlBtn" class="px-8 py-5 text-xl font-bold rounded-full transition-all duration-300 ease-in-out shadow-lg focus:outline-none focus:ring-4 focus:ring-blue-400" aria-labelledby="btn-text">
+                    <span class="flex items-center justify-center">
+                        <svg id="mic-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mr-3" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>
+                        <span id="btn-text">Start Listening</span>
+                    </span>
+                </button>
+                <button id="clearBtn" class="px-6 py-3 text-lg font-medium bg-gray-700 hover:bg-gray-600 rounded-full transition-all duration-300 ease-in-out shadow-lg focus:outline-none focus:ring-4 focus:ring-gray-400" aria-label="Clear transcripts">
+                    Clear
+                </button>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            // Using a custom modal instead of alert
+            const alertModal = document.createElement('div');
+            alertModal.innerHTML = `<div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center"><div class="bg-gray-800 p-8 rounded-lg text-center">Sorry, your browser does not support Speech Recognition. Please try Chrome or Safari.</div></div>`;
+            document.body.appendChild(alertModal);
+        }
+
+        const transcriptContainer = document.getElementById('transcript-container');
+        const controlBtn = document.getElementById('controlBtn');
+        const btnText = document.getElementById('btn-text');
+        const micIcon = document.getElementById('mic-icon');
+        const languageSelect = document.getElementById('language-select');
+        const clearBtn = document.getElementById('clearBtn');
+        const waveformCanvas = document.getElementById('waveform');
+        const canvasCtx = waveformCanvas.getContext('2d');
+        
+        let isListening = false;
+        let recognition;
+        let interimElement = null;
+        let animationId;
+        let isSpeaking = false;
+        let lastSpeechTime = 0;
+        let currentSpeaker = 0;
+        const speakerColors = ['text-blue-200', 'text-green-200', 'text-yellow-200', 'text-purple-200', 'text-pink-200'];
+
+        function showInitialMessage() {
+            transcriptContainer.innerHTML = `<p class="text-3xl md:text-5xl lg:text-6xl font-medium text-center text-gray-300 leading-relaxed self-center my-auto">Press "Start Listening" to begin subtitling.</p>`;
+        }
+
+        showInitialMessage();
+
+        function startVisualization() {
+            if (isSpeaking) {
+                drawSimulatedWaveform();
+            }
+        }
+
+        function stopVisualization() {
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+            }
+            // Clear canvas
+            canvasCtx.clearRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+        }
+
+        function drawSimulatedWaveform() {
+            if (!isSpeaking) {
+                stopVisualization();
+                return;
+            }
+            canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            canvasCtx.fillRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+            const barCount = 20;
+            const barWidth = waveformCanvas.width / barCount;
+            let x = 0;
+            for (let i = 0; i < barCount; i++) {
+                const barHeight = Math.random() * waveformCanvas.height * 0.8 + 10; // Random height
+                canvasCtx.fillStyle = `rgba(59, 130, 246, ${Math.random() * 0.8 + 0.2})`; // Blue with varying opacity
+                canvasCtx.fillRect(x, waveformCanvas.height - barHeight, barWidth - 2, barHeight);
+                x += barWidth;
+            }
+            animationId = requestAnimationFrame(drawSimulatedWaveform);
+        }
+
+        function setButtonState(listening) {
+            isListening = listening;
+            if (isListening) {
+                controlBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+                controlBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+                btnText.textContent = 'Stop Listening';
+                micIcon.classList.add('animate-pulse');
+            } else {
+                controlBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
+                controlBtn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+                btnText.textContent = 'Start Listening';
+                micIcon.classList.remove('animate-pulse');
+            }
+        }
+        
+        setButtonState(false);
+
+        function setupRecognition() {
+            recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = languageSelect.value;
+
+            recognition.onresult = (event) => {
+                let interim_transcript = '';
+                let final_transcript_this_event = '';
+
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    const transcript_part = event.results[i][0].transcript;
+                    if (event.results[i].isFinal) {
+                        final_transcript_this_event += transcript_part;
+                    } else {
+                        interim_transcript += transcript_part;
+                    }
+                }
+
+                const currentTime = Date.now();
+                if (final_transcript_this_event && currentTime - lastSpeechTime > 5000) { // 5 second pause
+                    currentSpeaker = (currentSpeaker + 1) % speakerColors.length;
+                }
+                if (final_transcript_this_event) {
+                    lastSpeechTime = currentTime;
+                }
+
+                if (final_transcript_this_event) {
+                    if (interimElement) {
+                        interimElement.remove();
+                        interimElement = null;
+                    }
+                    const p = document.createElement('p');
+                    // Capitalize the first letter and add a period.
+                    let formattedText = final_transcript_this_event.trim();
+                    formattedText = formattedText.charAt(0).toUpperCase() + formattedText.slice(1);
+                    if (!formattedText.endsWith('.') && !formattedText.endsWith('!') && !formattedText.endsWith('?')) {
+                        formattedText += '.';
+                    }
+                    const timestamp = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                    p.innerHTML = `<span class="text-sm text-gray-400 mr-2">${timestamp}</span><span>${formattedText}</span>`;
+                    p.className = "text-3xl md:text-4xl font-medium " + speakerColors[currentSpeaker] + " leading-relaxed mb-4 text-left w-full";
+                    transcriptContainer.appendChild(p);
+                }
+
+                if (interim_transcript) {
+                    if (!interimElement) {
+                        interimElement = document.createElement('p');
+                        interimElement.className = "text-3xl md:text-4xl font-medium text-gray-500 leading-relaxed mb-4 text-left w-full";
+                        transcriptContainer.appendChild(interimElement);
+                    }
+                    interimElement.textContent = interim_transcript;
+                    // Trigger visualization
+                    if (!isSpeaking) {
+                        isSpeaking = true;
+                        startVisualization();
+                    }
+                } else {
+                    isSpeaking = false;
+                }
+                
+                transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
+            };
+
+            recognition.onstart = () => setButtonState(true);
+
+            recognition.onend = () => {
+                if (interimElement) {
+                    // If there's leftover interim text, finalize it.
+                    let finalText = interimElement.textContent.trim();
+                    if(finalText){
+                        const timestamp = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                        interimElement.innerHTML = `<span class="text-sm text-gray-400 mr-2">${timestamp}</span><span>${finalText.charAt(0).toUpperCase() + finalText.slice(1)}</span>`;
+                        if (!finalText.endsWith('.') && !finalText.endsWith('!') && !finalText.endsWith('?')) {
+                            interimElement.innerHTML = interimElement.innerHTML.replace('</span>', '.</span>');
+                        }
+                        interimElement.classList.remove('text-gray-500');
+                        interimElement.classList.add(speakerColors[currentSpeaker]);
+                    } else {
+                        interimElement.remove();
+                    }
+                    interimElement = null;
+                }
+                setButtonState(false);
+                isSpeaking = false;
+                stopVisualization();
+                if (transcriptContainer.innerHTML.trim() === '') {
+                    showInitialMessage();
+                }
+            };
+
+            recognition.onerror = (event) => {
+                console.error("Speech recognition error", event.error);
+                let message = "An error occurred. Please try again.";
+                if (event.error === 'not-allowed') {
+                    message = "Microphone access was denied. Please allow microphone access in your browser settings and refresh the page.";
+                } else if (event.error === 'network') {
+                    message = "Network error. Please check your connection and try again.";
+                }
+                transcriptContainer.innerHTML = `<div class="text-center"><p class="text-2xl font-medium text-red-400 mb-4">${message}</p><button id="retryBtn" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-full transition-all duration-300">Retry</button></div>`;
+                setButtonState(false);
+                isSpeaking = false;
+                stopVisualization();
+                document.getElementById('retryBtn').addEventListener('click', () => {
+                    transcriptContainer.innerHTML = '';
+                    showInitialMessage();
+                });
+            };
+            
+            return recognition;
+        }
+
+        controlBtn.addEventListener('click', () => {
+            if (isListening) {
+                if (recognition) recognition.stop();
+                stopVisualization();
+            } else {
+                transcriptContainer.innerHTML = '';
+                interimElement = null;
+                currentSpeaker = 0;
+                lastSpeechTime = 0;
+                recognition = setupRecognition();
+                recognition.start();
+            }
+        });
+
+        clearBtn.addEventListener('click', () => {
+            transcriptContainer.innerHTML = '';
+            showInitialMessage();
+            currentSpeaker = 0;
+            lastSpeechTime = 0;
+            if (isListening) {
+                recognition.stop();
+                stopVisualization();
+            }
+        });
+
+        languageSelect.addEventListener('change', () => {
+            if (isListening) {
+                recognition.stop();
+                transcriptContainer.innerHTML = '';
+                interimElement = null;
+                recognition = setupRecognition();
+                recognition.start();
+            } else {
+                recognition = setupRecognition();
+            }
+        });
+    </script>
+</body>
+</html>
+
